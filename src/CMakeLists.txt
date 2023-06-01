@@ -55,6 +55,10 @@ if(NFC_LINUX)
 	list(APPEND FIDO_SOURCES netlink.c nfc.c nfc_linux.c)
 endif()
 
+if(USE_BLE)
+	list(APPEND FIDO_SOURCES ble.c)
+endif()
+
 if(USE_PCSC)
 	list(APPEND FIDO_SOURCES nfc.c pcsc.c)
 endif()
@@ -123,6 +127,7 @@ list(APPEND TARGET_LIBRARIES
 	${HIDAPI_LIBRARIES}
 	${ZLIB_LIBRARIES}
 	${PCSC_LIBRARIES}
+	${SYSTEMD_LIBRARIES}
 )
 
 # static library

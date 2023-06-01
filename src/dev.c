@@ -273,6 +273,9 @@ fido_dev_info_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
 #ifdef USE_WINHELLO
 	run_manifest(devlist, ilen, olen, "winhello", fido_winhello_manifest);
 #endif
+#ifdef USE_BLE
+	run_manifest(devlist, ilen, olen, "ble", fido_ble_manifest);
+#endif
 
 	return (FIDO_OK);
 }
@@ -302,6 +305,12 @@ fido_dev_open(fido_dev_t *dev, const char *path)
 #ifdef USE_PCSC
 	if (fido_is_pcsc(path) && fido_dev_set_pcsc(dev) < 0) {
 		fido_log_debug("%s: fido_dev_set_pcsc", __func__);
+		return FIDO_ERR_INTERNAL;
+	}
+#endif
+#ifdef USE_BLE
+	if (fido_is_ble(path) && fido_dev_set_ble(dev) < 0) {
+		fido_log_debug("%s: fido_dev_set_ble", __func__);
 		return FIDO_ERR_INTERNAL;
 	}
 #endif
