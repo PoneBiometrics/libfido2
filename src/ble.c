@@ -42,62 +42,17 @@ fido_dev_set_ble(fido_dev_t *d)
 }
 
 static int
-extract_nodes(const char* xml, fido_str_array_t ** nodes)
-{
-	fido_str_array_t *ret = (fido_str_array_t*) malloc(sizeof(fido_str_array_t));
-	ret->len = 0;
-	ret->ptr = NULL;
-	*nodes = ret;
-	for  (const char* a=xml;a!=NULL;)
-	{
-		const char* b=a;
-		size_t len = 0;
-		a = strstr(b,"<node name=\"");
-		if(a==NULL){
-			break;
-		}
-		b = strstr(a+12,"\"/>");
-		if(b==NULL){
-			break;
-		}
-		len = (size_t)(b - (a+12));
-		ret->len += 1;
-		if(ret->ptr == NULL){
-			ret->ptr = malloc(sizeof(char*));
-		}else{
-			ret->ptr = realloc(ret->ptr, ret->len);
-		}
-		ret->ptr[ret->len-1] = malloc(len+1);
-		memcpy(ret->ptr[ret->len-1],a+12,len);
-		ret->ptr[ret->len-1][len] = 0;
-		a = b;
+fido_str_array_append(fido_str_array_t *array, const char* object){
+	if(array->ptr == NULL){
+		array->ptr = malloc(sizeof(char*));
+	}else{
+		array->ptr = realloc(array->ptr, sizeof(char*) * (array->len+1));
 	}
+	array->ptr[array->len] = strdup(object);
+	array->len += 1;
 	return FIDO_OK;
 }
 
-
-static int
-fido_ble_dbus_get_children(sd_bus *bus, const char *path, fido_str_array_t **result){
-	_cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-	_cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
-	int r;
-
-	r = sd_bus_call_method(bus, "org.bluez", path, "org.freedesktop.DBus.Introspectable", "Introspect", &error, &m, "");
-	if (r < 0) {
-		fido_log_debug("failed to get children: %s\n", strerror(-r));
-		return FIDO_ERR_INTERNAL;
-	}
-
-
-	const char *ans;
-	r = sd_bus_message_read(m, "s", &ans);
-	if (r < 0) {
-		fido_log_debug("failed to get children reply: %s\n", strerror(-r));
-		return FIDO_ERR_INTERNAL;
-	}
-	extract_nodes(ans,result);
-	return FIDO_OK;
-}
 
 static void fido_str_array_freep(fido_str_array_t **x){
 	//printf("cleaning up\n");
@@ -112,22 +67,6 @@ static void strv_freep(char *** strv){
 		free((*strv)[k]);
 	}
 	free(*strv);
-}
-
-static int
-ble_is_fido(sd_bus *bus, const char *ble_device) {
-	_cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
-	_cleanup_(strv_freep) char **UUIDs;
-	sd_bus_get_property_strv(bus, "org.bluez", ble_device, "org.bluez.Device1", "UUIDs", &error, &UUIDs);
-	if (UUIDs == NULL)
-		return 0;
-	for (size_t k = 0; UUIDs[k] !=  NULL; k++)
-	{
-		if (strcmp("0000fffd-0000-1000-8000-00805f9b34fb", UUIDs[k])==0) {
-			return 1;
-		}
-	}
-	return 0;
 }
 
 
@@ -172,6 +111,64 @@ fail:
 }
 
 
+static int
+fido_ble_dbus_get_fido_devices(sd_bus *bus, fido_str_array_t **result){
+	_cleanup_(sd_bus_error_free) sd_bus_error error = SD_BUS_ERROR_NULL;
+	_cleanup_(sd_bus_message_unrefp) sd_bus_message *m = NULL;
+	int r;
+	fido_str_array_t *res = calloc(1, sizeof(fido_algo_array_t));
+	*result = res;
+
+	r = sd_bus_call_method(bus, "org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", &error, &m, "");
+	if (r < 0) {
+		fido_log_debug("failed to get managed objects: %s\n", strerror(-r));
+		return FIDO_ERR_INTERNAL;
+	}
+
+	sd_bus_message_enter_container(m, SD_BUS_TYPE_ARRAY, "{oa{sa{sv}}}");
+	while(sd_bus_message_enter_container(m, SD_BUS_TYPE_DICT_ENTRY, "oa{sa{sv}}") >0){
+		const char *object;
+		sd_bus_message_read_basic(m, SD_BUS_TYPE_OBJECT_PATH, &object);
+		sd_bus_message_enter_container(m, SD_BUS_TYPE_ARRAY, "{sa{sv}}");
+
+		while(sd_bus_message_enter_container(m, SD_BUS_TYPE_DICT_ENTRY, "sa{sv}") >0){
+			const char *interface;
+			sd_bus_message_read_basic(m, SD_BUS_TYPE_STRING, &interface);
+
+			if(strcmp(interface, "org.bluez.Device1")==0){
+				sd_bus_message_enter_container(m,SD_BUS_TYPE_ARRAY, "{sv}");
+				while (sd_bus_message_enter_container(m, SD_BUS_TYPE_DICT_ENTRY,"sv")>0){
+					const char *property;
+					sd_bus_message_read_basic(m, SD_BUS_TYPE_STRING, &property);
+
+					if(strcmp(property, "UUIDs")==0){
+						_cleanup_(strv_freep) char **uuids;
+						sd_bus_message_enter_container(m, SD_BUS_TYPE_VARIANT, "as");
+						sd_bus_message_read_strv(m, &uuids);
+						for( size_t i = 0; uuids[i] !=NULL; i +=1){
+							if(strcmp("0000fffd-0000-1000-8000-00805f9b34fb", uuids[i])==0){
+								fido_str_array_append(res, object);
+							}
+						}
+						sd_bus_message_exit_container(m);
+					}else{
+						sd_bus_message_skip(m,"v");
+					}
+					sd_bus_message_exit_container(m);
+					sd_bus_message_exit_container(m);
+				}
+				
+			}else{
+				sd_bus_message_skip(m,"a{sv}");
+			}
+			sd_bus_message_exit_container(m);
+		}
+		sd_bus_message_exit_container(m);
+		sd_bus_message_exit_container(m);
+	}
+	sd_bus_message_exit_container(m);
+	return FIDO_OK;
+}
 
 int
 fido_ble_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
@@ -195,38 +192,25 @@ fido_ble_manifest(fido_dev_info_t *devlist, size_t ilen, size_t *olen)
 		return FIDO_ERR_INTERNAL;
 	}
 
-	_cleanup_(fido_str_array_freep) fido_str_array_t *hcis;
-	// inspect /org/bluez to get the bluetooth adaptor(s)
-	fido_ble_dbus_get_children(bus, "/org/bluez", &hcis);
-	// better approach instead: busctl call org.bluez / org.freedesktop.DBus.ObjectManager GetManagedObjects a{oa{sa{sv}}}
-	// { object => { interface => { property => variable value} } }
-	// and scan for interface "org.bluez.Device1" property "UUIDs"
-	for(size_t i = 0; i < hcis->len;i++){
-		char hci_device[20];
-		snprintf(hci_device, sizeof(hci_device),"/org/bluez/%s", hcis->ptr[i]);
-		_cleanup_(fido_str_array_freep) fido_str_array_t *bt_devices;
 
-		fido_ble_dbus_get_children(bus, hci_device, &bt_devices);
-		for(size_t j=0; j < bt_devices->len; j++){
-			char ble_device[40];
-			snprintf(ble_device, sizeof(ble_device),"/org/bluez/%s/%s", hcis->ptr[i], bt_devices->ptr[j]);
-			if(ble_is_fido(bus, ble_device)){
-				if (copy_info(&devlist[*olen], bus, ble_device) == 0) {
-					devlist[*olen].io = (fido_dev_io_t) {
-						fido_ble_open,
-						fido_ble_close,
-						fido_ble_read,
-						fido_ble_write,
-					};
-					devlist[*olen].transport = (fido_dev_transport_t) {
-						fido_ble_rx,
-						fido_ble_tx,
-					};
-					if (++(*olen) == ilen)
-						break;
-				}
-			}				
+	_cleanup_(fido_str_array_freep) fido_str_array_t *fido_devices;
+	fido_ble_dbus_get_fido_devices(bus, &fido_devices);
+	for(size_t i = 0; i < fido_devices->len; i++){
+		if (copy_info(&devlist[*olen], bus, fido_devices->ptr[i]) == 0) {
+			devlist[*olen].io = (fido_dev_io_t) {
+				fido_ble_open,
+				fido_ble_close,
+				fido_ble_read,
+				fido_ble_write,
+			};
+			devlist[*olen].transport = (fido_dev_transport_t) {
+				fido_ble_rx,
+				fido_ble_tx,
+			};
+			if (++(*olen) == ilen)
+				break;
 		}
+
 	}
 	
 	return FIDO_OK;
